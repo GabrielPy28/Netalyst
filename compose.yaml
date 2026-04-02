@@ -1,0 +1,42 @@
+# Desarrollo local: el código vive en ./backend/app y se monta en el contenedor;
+# uvicorn --reload reinicia al guardar cambios. No hace falta rebuild salvo que
+# cambies backend/requirements.txt (entonces: docker compose build --no-cache).
+#
+# Producción: quita `volumes` y `command` (o usa compose.prod.yaml) para servir solo
+# el código copiado en la imagen.
+#
+#   docker compose up --build
+#   docker compose up --build -d
+#   docker compose logs -f api
+#   docker compose down
+
+services:
+  api:
+    build: .
+    image: netalyst-api:latest
+    container_name: netalyst-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./backend/app:/service/app
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: netalyst-web:latest
+    container_name: netalyst-web
+    ports:
+      - "5173:80"
+    depends_on:
+      - api

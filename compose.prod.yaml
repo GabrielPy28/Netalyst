@@ -1,0 +1,13 @@
+# Producción: imagen autocontenida (sin montar código local).
+# Uso: docker compose -f compose.yaml -f compose.prod.yaml up --build -d
+
+services:
+  api:
+    volumes: []
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"

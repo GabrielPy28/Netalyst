@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --purple: #6641ed;
+  --blue: #79bcf7;
+  --pink: #ff47ac;
+  --dark: #0f172a;
+  --white: #f8fafc;
+  --green: #31c950;
+  --yellow: #ffdf20;
+  --red: #e7180b;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--dark);
+  color: var(--white);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* SweetAlert2 tema oscuro acorde a La Neta */
+.swal2-popup.netalyst-swal {
+  background: #1e293b !important;
+  color: #f8fafc !important;
+  border: 1px solid rgba(102, 65, 237, 0.35);
+  border-radius: 1rem;
+}
+.swal2-popup.netalyst-swal .swal2-title {
+  color: #f8fafc !important;
+}
+.swal2-popup.netalyst-swal .swal2-html-container {
+  color: #cbd5e1 !important;
+}
+.swal2-popup.netalyst-swal .swal2-confirm {
+  background: #6641ed !important;
+  border-radius: 0.5rem !important;
+}
