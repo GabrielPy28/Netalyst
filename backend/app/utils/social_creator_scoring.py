@@ -64,16 +64,40 @@ def count_active_platforms_row(row: pd.Series) -> int:
     return n
 
 
-def max_followers_across_fetched(row: pd.Series) -> int:
-    vals: list[int] = []
-    for key in ("ig_followers", "tt_followers", "yt_subscriber_count"):
+def follower_count_for_keys(row: pd.Series, *keys: str) -> int:
+    """Mayor conteo válido entre alias (p. ej. ig_followers vs instagram_followers)."""
+    best = 0
+    for k in keys:
+        v = row.get(k)
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            continue
         try:
-            v = row.get(key)
-            if v is not None and not (isinstance(v, float) and pd.isna(v)):
-                vals.append(int(v))
+            n = int(float(v))
+            if n > best:
+                best = n
         except (TypeError, ValueError):
             continue
-    return max(vals) if vals else 0
+    return best
+
+
+def ig_followers_coalesced(row: pd.Series) -> int:
+    return follower_count_for_keys(row, "ig_followers", "instagram_followers")
+
+
+def tt_followers_coalesced(row: pd.Series) -> int:
+    return follower_count_for_keys(row, "tt_followers", "tiktok_followers")
+
+
+def yt_followers_coalesced(row: pd.Series) -> int:
+    return follower_count_for_keys(row, "yt_subscriber_count", "youtube_followers")
+
+
+def max_followers_across_fetched(row: pd.Series) -> int:
+    return max(
+        ig_followers_coalesced(row),
+        tt_followers_coalesced(row),
+        yt_followers_coalesced(row),
+    )
 
 
 def completeness_points_0_2(row: pd.Series) -> float:
@@ -140,20 +164,16 @@ def priority_band(total: float) -> str:
 
 def main_platform_for_row(row: pd.Series) -> tuple[str, int]:
     """Cuenta principal = la red con más seguidores según datos obtenidos (ig/tt/yt)."""
-    pairs: list[tuple[str, int]] = []
-    for key, label in (
-        ("ig_followers", "instagram"),
-        ("tt_followers", "tiktok"),
-        ("yt_subscriber_count", "youtube"),
-    ):
-        try:
-            v = row.get(key)
-            n = 0 if v is None or (isinstance(v, float) and pd.isna(v)) else int(v)
-        except (TypeError, ValueError):
-            n = 0
-        pairs.append((label, n))
-    best = max(pairs, key=lambda x: x[1])
-    return best[0], best[1]
+    pairs = [
+        ("instagram", ig_followers_coalesced(row)),
+        ("tiktok", tt_followers_coalesced(row)),
+        ("youtube", yt_followers_coalesced(row)),
+    ]
+    best_label, best_n = pairs[0]
+    for lab, n in pairs[1:]:
+        if n > best_n:
+            best_label, best_n = lab, n
+    return best_label, best_n
 
 
 def row_creator_score(row: pd.Series) -> dict[str, Any]:

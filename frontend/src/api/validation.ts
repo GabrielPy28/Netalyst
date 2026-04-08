@@ -64,21 +64,49 @@ export type ValidationStreamEvent =
   | ({ type: "complete" } & ValidationUploadResponse)
   | { type: "error"; message: string };
 
-function validationResponseFromComplete(ev: ValidationStreamEvent): ValidationUploadResponse {
-  const e = ev as Record<string, unknown>;
-  const { type: _t, ...rest } = e;
-  return rest as unknown as ValidationUploadResponse;
+type ValidationJobStatusResponse = {
+  job_id: string;
+  status: "running" | "complete" | "error";
+  response_mode: "json" | "zip";
+  events_tail: Record<string, unknown>[];
+  result?: ValidationUploadResponse;
+  summary?: { program_nombre: string; rows: number; excluded_rows: number };
+  download_ready?: boolean;
+  error_message?: string | null;
+};
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const id = window.setTimeout(() => resolve(), ms);
+    const onAbort = () => {
+      window.clearTimeout(id);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export type UploadValidationStreamOptions = {
-  /** Si se aborta (p. ej. al salir de la página), el servidor puede cortar el pipeline y liberar el worker. */
+  /** Si se aborta (p. ej. al salir de la página), deja de hacer polling. */
   signal?: AbortSignal;
+  /**
+   * Snapshot del tail de eventos del servidor (cada poll). Sustituye al stream SSE
+   * para corridas de muchas horas sin una sola conexión HTTP larga.
+   */
+  onTail?: (events: ValidationStreamEvent[]) => void;
 };
 
+/**
+ * Encola validación y hace polling hasta obtener el resultado JSON.
+ * Adecuado para listas enormes o pasos lentos (horas); evita timeouts de proxy/CDN.
+ */
 export async function uploadValidationStream(
   programId: string,
   file: File,
-  onEvent: (ev: ValidationStreamEvent) => void,
   options?: UploadValidationStreamOptions,
 ): Promise<ValidationUploadResponse> {
   const token = getToken();
@@ -88,72 +116,52 @@ export async function uploadValidationStream(
   fd.append("file", file);
   fd.append("response_mode", "json");
 
-  const res = await fetch(`${apiBase}/validation/upload-stream`, {
+  const res = await fetch(`${apiBase}/validation/jobs`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
     body: fd,
     signal: options?.signal,
   });
 
-  if (!res.ok) {
+  if (res.status !== 202) {
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     throw new Error(errorFromBody(data) || res.statusText);
   }
 
-  const reader = res.body?.getReader();
-  if (!reader) {
-    throw new Error("El navegador no soporta lectura del stream de progreso.");
-  }
+  const created = (await res.json()) as { job_id: string; poll_interval_seconds?: number };
+  const intervalMs = Math.max(1000, (created.poll_interval_seconds ?? 2.5) * 1000);
+  const jobId = created.job_id;
 
-  const dec = new TextDecoder();
-  let buf = "";
-  let complete: ValidationUploadResponse | null = null;
-
-  try {
-    outer: while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const chunks = buf.split("\n\n");
-      buf = chunks.pop() ?? "";
-      for (const rawBlock of chunks) {
-        const block = rawBlock.trim();
-        if (!block) continue;
-        for (const line of block.split("\n")) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const json = trimmed.slice(5).trim();
-          if (!json) continue;
-          let ev: ValidationStreamEvent;
-          try {
-            ev = JSON.parse(json) as ValidationStreamEvent;
-          } catch {
-            continue;
-          }
-          onEvent(ev);
-          if (ev.type === "complete") {
-            complete = validationResponseFromComplete(ev);
-            break outer;
-          }
-          if (ev.type === "error") {
-            throw new Error(ev.message);
-          }
-        }
+  let first = true;
+  while (true) {
+    if (!first) {
+      if (options?.signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
       }
+      await sleep(intervalMs, options?.signal);
     }
-  } finally {
-    await reader.cancel().catch(() => {});
-    try {
-      reader.releaseLock();
-    } catch {
-      /* ya liberado */
-    }
-  }
+    first = false;
 
-  if (!complete) {
-    throw new Error("La validación terminó sin recibir el resultado final. Revisa la consola del API.");
+    const stRes = await fetch(`${apiBase}/validation/jobs/${jobId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: options?.signal,
+    });
+    const st = (await stRes.json().catch(() => ({}))) as ValidationJobStatusResponse & Record<string, unknown>;
+    if (!stRes.ok) {
+      throw new Error(errorFromBody(st) || stRes.statusText);
+    }
+
+    if (options?.onTail && Array.isArray(st.events_tail)) {
+      options.onTail(st.events_tail as ValidationStreamEvent[]);
+    }
+
+    if (st.status === "error") {
+      throw new Error(st.error_message || "Error en validación");
+    }
+    if (st.status === "complete" && st.result) {
+      return st.result;
+    }
   }
-  return complete;
 }
 
 export async function uploadValidationJson(
@@ -178,21 +186,72 @@ export async function uploadValidationJson(
   return data as unknown as ValidationUploadResponse;
 }
 
-export async function uploadValidationZip(programId: string, file: File): Promise<Blob> {
+export type UploadValidationZipOptions = {
+  signal?: AbortSignal;
+};
+
+export async function uploadValidationZip(
+  programId: string,
+  file: File,
+  options?: UploadValidationZipOptions,
+): Promise<Blob> {
   const token = getToken();
   if (!token) throw new Error("Sesión requerida");
   const fd = new FormData();
   fd.append("program_id", programId);
   fd.append("file", file);
   fd.append("response_mode", "zip");
-  const res = await fetch(`${apiBase}/validation/upload`, {
+
+  const res = await fetch(`${apiBase}/validation/jobs`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
     body: fd,
+    signal: options?.signal,
   });
-  if (!res.ok) {
+
+  if (res.status !== 202) {
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     throw new Error(errorFromBody(data) || res.statusText);
   }
-  return res.blob();
+
+  const created = (await res.json()) as { job_id: string; poll_interval_seconds?: number };
+  const intervalMs = Math.max(1000, (created.poll_interval_seconds ?? 2.5) * 1000);
+  const jobId = created.job_id;
+
+  let first = true;
+  while (true) {
+    if (!first) {
+      if (options?.signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      await sleep(intervalMs, options?.signal);
+    }
+    first = false;
+
+    const stRes = await fetch(`${apiBase}/validation/jobs/${jobId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: options?.signal,
+    });
+    const st = (await stRes.json().catch(() => ({}))) as ValidationJobStatusResponse & Record<string, unknown>;
+    if (!stRes.ok) {
+      throw new Error(errorFromBody(st) || stRes.statusText);
+    }
+
+    if (st.status === "error") {
+      throw new Error(st.error_message || "Error generando ZIP");
+    }
+    if (st.status === "complete" && st.download_ready) {
+      break;
+    }
+  }
+
+  const dl = await fetch(`${apiBase}/validation/jobs/${jobId}/download`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: options?.signal,
+  });
+  if (!dl.ok) {
+    const data = (await dl.json().catch(() => ({}))) as Record<string, unknown>;
+    throw new Error(errorFromBody(data) || dl.statusText);
+  }
+  return dl.blob();
 }

@@ -43,7 +43,13 @@ from app.utils.facebook_reels import (
     flatten_facebook_reel_row,
     resolve_facebook_page_url,
 )
-from app.utils.social_creator_scoring import row_creator_score
+from app.utils.social_creator_scoring import (
+    ig_followers_coalesced,
+    main_platform_for_row,
+    row_creator_score,
+    tt_followers_coalesced,
+    yt_followers_coalesced,
+)
 from app.utils.social_vertical_format import (
     format_vertical_phrase,
     normalize_youtube_topics_for_vertical,
@@ -438,9 +444,9 @@ def fetch_youtube_channels(ctx: ValidationContext) -> ValidationContext:
 
 def _pick_main_platform_label(row: pd.Series) -> str:
     """Plataforma con más seguidores; empate → Instagram, luego TikTok, luego YouTube."""
-    ig_f = int(row.get("ig_followers") or 0)
-    tt_f = int(row.get("tt_followers") or 0)
-    yt_f = int(row.get("yt_subscriber_count") or 0)
+    ig_f = ig_followers_coalesced(row)
+    tt_f = tt_followers_coalesced(row)
+    yt_f = yt_followers_coalesced(row)
     order = [("Instagram", ig_f), ("Tiktok", tt_f), ("Youtube", yt_f)]
     best_l, best_f = order[0]
     for label, fc in order[1:]:
@@ -461,10 +467,73 @@ def _pick_main_platform_label(row: pd.Series) -> str:
 
 def _main_platform_follower_count(row: pd.Series, main: str) -> int:
     if main == "Instagram":
-        return int(row.get("ig_followers") or row.get("instagram_followers") or 0)
+        return ig_followers_coalesced(row)
     if main == "Tiktok":
-        return int(row.get("tt_followers") or row.get("tiktok_followers") or 0)
-    return int(row.get("yt_subscriber_count") or row.get("youtube_followers") or 0)
+        return tt_followers_coalesced(row)
+    return yt_followers_coalesced(row)
+
+
+_SLUG_TO_MAIN_DISPLAY = {"instagram": "Instagram", "tiktok": "Tiktok", "youtube": "Youtube"}
+_MAIN_DISPLAY_TO_SLUG = {v: k for k, v in _SLUG_TO_MAIN_DISPLAY.items()}
+
+
+def _normalize_creator_main_platform_slug(val: Any) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    s = str(val).strip().lower()
+    if not s or s in ("nan", "none", "null"):
+        return ""
+    if s in _SLUG_TO_MAIN_DISPLAY:
+        return s
+    return ""
+
+
+def _identity_vertical_for_slug(row: pd.Series, plat_slug: str) -> str:
+    """Misma lógica que apply_main_platform_identity para vertical/category."""
+    if plat_slug == "instagram":
+        raw_cat = row.get("instagram_category") or row.get("ig_business_category_name") or ""
+        segs = split_category_segments(raw_cat)
+        vert = format_vertical_phrase(segs)
+        return vert if vert else _INSTAGRAM_VERTICAL_DEFAULT
+    if plat_slug == "tiktok":
+        comm = row.get("tt_commerce_category")
+        sig = str(row.get("tt_signature") or row.get("tiktok_bio") or "")
+        raw_cat = infer_tiktok_vertical_category(comm, sig)
+        segs = split_category_segments(raw_cat)
+        vert = format_vertical_phrase(segs)
+        if vert:
+            return vert
+        fb = _clean_vertical_for_display(row.get("tiktok_category"))
+        return fb if fb else ""
+    if plat_slug == "youtube":
+        raw_cat = row.get("youtube_category") or row.get("yt_topic_categories_clean") or ""
+        segs = normalize_youtube_topics_for_vertical(raw_cat)
+        vert = format_vertical_phrase(segs)
+        if vert:
+            return vert
+        fb = _clean_vertical_for_display(row.get("youtube_category"))
+        return fb if fb else ""
+    return _clean_vertical_for_display(row.get("vertical"))
+
+
+def _identity_username_picture_for_slug(row: pd.Series, plat_slug: str) -> tuple[str, str]:
+    if plat_slug == "instagram":
+        un = str(row.get("ig_username_resolved") or row.get("instagram_username") or "").strip().lstrip("@")
+        pic = str(row.get("instagram_picture") or "").strip()
+        return un, pic
+    if plat_slug == "tiktok":
+        un = str(row.get("tt_username_resolved") or row.get("tiktok_username") or "").strip().lstrip("@")
+        pic = str(row.get("tiktok_picture") or "").strip()
+        return un, pic
+    if plat_slug == "youtube":
+        pic = str(row.get("youtube_picture") or "").strip()
+        un = str(row.get("yt_custom_url") or "").strip().lstrip("@")
+        if not un:
+            un = str(row.get("youtube_channel") or "").strip().lstrip("@")
+        if not un:
+            un = str(row.get("yt_channel_id") or "").strip()
+        return un, pic
+    return "", ""
 
 
 def apply_main_platform_identity(ctx: ValidationContext) -> ValidationContext:
@@ -485,31 +554,9 @@ def apply_main_platform_identity(ctx: ValidationContext) -> ValidationContext:
     for _, row in df.iterrows():
         main = _pick_main_platform_label(row)
         mf = _main_platform_follower_count(row, main)
-
-        if main == "Instagram":
-            un = str(row.get("ig_username_resolved") or row.get("instagram_username") or "").strip()
-            pic = str(row.get("instagram_picture") or "").strip()
-            raw_cat = row.get("instagram_category") or row.get("ig_business_category_name") or ""
-            segs = split_category_segments(raw_cat)
-        elif main == "Tiktok":
-            un = str(row.get("tt_username_resolved") or row.get("tiktok_username") or "").strip()
-            pic = str(row.get("tiktok_picture") or "").strip()
-            comm = row.get("tt_commerce_category")
-            sig = str(row.get("tt_signature") or row.get("tiktok_bio") or "")
-            raw_cat = infer_tiktok_vertical_category(comm, sig)
-            segs = split_category_segments(raw_cat)
-        else:
-            pic = str(row.get("youtube_picture") or "").strip()
-            raw_cat = row.get("youtube_category") or row.get("yt_topic_categories_clean") or ""
-            segs = normalize_youtube_topics_for_vertical(raw_cat)
-            # Handle visible para operación diaria: @customUrl > slug del archivo > channel id
-            un = str(row.get("yt_custom_url") or "").strip().lstrip("@")
-            if not un:
-                un = str(row.get("youtube_channel") or "").strip().lstrip("@")
-            if not un:
-                un = str(row.get("yt_channel_id") or "").strip()
-
-        vert = format_vertical_phrase(segs)
+        slug = _MAIN_DISPLAY_TO_SLUG.get(main, "instagram")
+        un, pic = _identity_username_picture_for_slug(row, slug)
+        vert = _identity_vertical_for_slug(row, slug)
         usernames.append(un)
         platforms.append(main)
         pictures.append(pic)
@@ -584,64 +631,47 @@ def sync_identity_columns_from_creator_main_platform(ctx: ValidationContext) -> 
     pictures: list[str] = []
     max_followers_list: list[int] = []
     verticals: list[str] = []
+    main_platform_labels: list[str] = []
 
     for _, row in df.iterrows():
-        plat = str(row.get("creator_main_platform") or "").strip().lower()
+        plat = _normalize_creator_main_platform_slug(row.get("creator_main_platform"))
+        if not plat:
+            plat, _ = main_platform_for_row(row)
 
-        if plat == "instagram":
-            un = str(row.get("instagram_username") or "").strip().lstrip("@")
-            pic = str(row.get("instagram_picture") or "").strip()
-            try:
-                mf = int(row.get("instagram_followers") or row.get("ig_followers") or 0)
-            except (TypeError, ValueError):
-                mf = 0
-            v = _clean_vertical_for_display(row.get("instagram_category"))
-            if not v:
-                v = _INSTAGRAM_VERTICAL_DEFAULT
-        elif plat == "tiktok":
-            un = str(row.get("tiktok_username") or "").strip().lstrip("@")
-            pic = str(row.get("tiktok_picture") or "").strip()
-            try:
-                mf = int(row.get("tiktok_followers") or row.get("tt_followers") or 0)
-            except (TypeError, ValueError):
-                mf = 0
-            v = _clean_vertical_for_display(row.get("tiktok_category"))
-        elif plat == "youtube":
-            un = str(row.get("yt_custom_url") or "").strip().lstrip("@")
-            if not un:
-                un = str(row.get("youtube_channel") or "").strip().lstrip("@")
-            if not un:
-                un = str(row.get("yt_channel_id") or "").strip()
-            pic = str(row.get("youtube_picture") or "").strip()
-            try:
-                mf = int(row.get("youtube_followers") or row.get("yt_subscriber_count") or 0)
-            except (TypeError, ValueError):
-                mf = 0
-            v = _clean_vertical_for_display(row.get("youtube_category"))
-        else:
-            un = str(row.get("username") or "").strip()
-            pic = str(row.get("picture") or "").strip()
-            try:
-                mf = int(row.get("max_followers") or 0)
-            except (TypeError, ValueError):
-                mf = 0
-            v = _clean_vertical_for_display(row.get("vertical"))
+        main_display = _SLUG_TO_MAIN_DISPLAY.get(plat, "Instagram")
+        un, pic = _identity_username_picture_for_slug(row, plat)
+        v = _identity_vertical_for_slug(row, plat)
+
+        try:
+            mf = int(row.get("creator_main_platform_followers") or 0)
+        except (TypeError, ValueError):
+            mf = 0
+        if mf <= 0:
+            mf = _main_platform_follower_count(row, main_display)
+        if mf <= 0:
+            mf = max(
+                ig_followers_coalesced(row),
+                tt_followers_coalesced(row),
+                yt_followers_coalesced(row),
+            )
 
         usernames.append(un)
         pictures.append(pic)
         max_followers_list.append(mf)
         verticals.append(v)
+        main_platform_labels.append(main_display)
 
     df["username"] = usernames
     df["picture"] = pictures
     df["max_followers"] = max_followers_list
     df["vertical"] = verticals
     df["category"] = verticals
+    df["main_platform"] = main_platform_labels
 
     _log(
         ctx,
         key,
-        "username, picture, max_followers, vertical y category según creator_main_platform.",
+        "username, picture, max_followers, main_platform, vertical y category según creator_main_platform.",
         ok=True,
         rows=len(df),
     )

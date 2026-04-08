@@ -112,23 +112,26 @@ export function ProgramValidatePage() {
     setRunning(true);
     const runStartedAt = Date.now();
     try {
-      const data = await uploadValidationStream(
-        id,
-        file,
-        (ev) => {
-          streamLogRef.current = [...streamLogRef.current, ev].slice(-100);
-          setStreamLog(streamLogRef.current);
-          if (ev.type === "criterion_start") {
-            setStreamHeadline(`Criterio ${ev.orden}: ${ev.criterion_nombre}`);
+      const data = await uploadValidationStream(id, file, {
+        signal: ac.signal,
+        onTail: (tail) => {
+          streamLogRef.current = tail;
+          setStreamLog(tail);
+          const last = tail[tail.length - 1];
+          if (!last) {
+            setStreamHeadline("En progreso…");
+            return;
           }
-          if (ev.type === "step_start") {
+          if (last.type === "criterion_start") {
+            setStreamHeadline(`Criterio ${last.orden}: ${last.criterion_nombre}`);
+          }
+          if (last.type === "step_start") {
             setStreamHeadline(
-              `${ev.criterion_nombre} — Paso ${ev.paso_num}: ${ev.step_nombre} (${ev.funcion_a_ejecutar})`,
+              `${last.criterion_nombre} — Paso ${last.paso_num}: ${last.step_nombre} (${last.funcion_a_ejecutar})`,
             );
           }
         },
-        { signal: ac.signal },
-      );
+      });
       setResult(data);
       const merged = [...data.preview, ...data.excluded_preview];
       const ytAdd = addYoutubeUnitsForSession(merged);

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -46,3 +46,26 @@ class ValidationUploadResponse(BaseModel):
         default=False,
         description="True si excluded_preview no incluye todas las filas excluidas.",
     )
+
+
+class ValidationJobCreatedOut(BaseModel):
+    job_id: UUID
+    status: Literal["running"] = "running"
+    poll_interval_seconds: float = Field(
+        default=2.5,
+        description="Intervalo sugerido entre GET /validation/jobs/{id} en el cliente.",
+    )
+
+
+class ValidationJobStatusOut(BaseModel):
+    job_id: UUID
+    status: Literal["running", "complete", "error"]
+    response_mode: Literal["json", "zip"]
+    events_tail: list[dict[str, Any]] = Field(default_factory=list)
+    result: ValidationUploadResponse | None = None
+    summary: dict[str, Any] | None = Field(
+        default=None,
+        description="Si response_mode=zip y complete: filas, excluidos, nombre del programa.",
+    )
+    download_ready: bool = False
+    error_message: str | None = None

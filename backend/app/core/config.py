@@ -102,6 +102,13 @@ class Settings(BaseSettings):
     # Comentarios SSE periódicos si un paso tarda mucho (evita corte por idle en Railway/proxies).
     # En Railway suele ir bien 3–5 s; variable: VALIDATION_SSE_KEEPALIVE_SECONDS.
     validation_sse_keepalive_seconds: float = 5.0
+    # Validación asíncrona (POST /validation/jobs + polling): soporta corridas de muchas horas sin
+    # mantener una sola conexión HTTP abierta (evita timeouts de nginx/CDN a ~1 h). Los jobs viven
+    # en memoria en el proceso: un redeploy o reinicio del contenedor los pierde (re-ejecutar).
+    validation_async_max_concurrent: int = 5
+    validation_job_events_tail_max: int = 100
+    validation_job_max_age_hours: float = 48.0
+    validation_job_poll_interval_seconds: float = 2.5
 
     @field_validator(
         "supabase_url",

@@ -54,7 +54,9 @@ export function ValidationFlowNotes({ program, lastYoutubeUnitsEstimate }: Props
           <li>
             <strong>Redes sociales (Apify — Instagram, TikTok, Facebook):</strong> cada ejecución
             usa tu plan y límites de Apify. Revisa saldo y límites de rate en el panel de Apify; en
-            listas grandes el tiempo y el consumo crecen.
+            listas grandes el tiempo y el consumo crecen. Las corridas muy largas (varias horas) usan
+            trabajo en segundo plano en el servidor y el navegador solo consulta el estado; mantén
+            esta pestaña abierta hasta que termine.
           </li>
         )}
         {youtube && (
