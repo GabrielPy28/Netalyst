@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
 
+    # CORS: el navegador no permite Access-Control-Allow-Origin: * con credentials: true.
+    # Lista separada por comas. Para permitir cualquier
+    # origen usa cors_allowed_origins="*" y cors_allow_credentials=false.
+    cors_allowed_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,https://netalyst.vercel.app"
+    )
+    cors_allow_credentials: bool = True
+
     supabase_url: str = ""
     supabase_secret_key: str = ""
     supabase_public_key: str = Field(

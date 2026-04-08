@@ -27,10 +27,25 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+def _cors_allow_origins_and_credentials() -> tuple[list[str], bool]:
+    raw = settings.cors_allowed_origins.strip()
+    if raw == "*":
+        return ["*"], False
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    if not origins:
+        origins = [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "https://netalyst.vercel.app",
+        ]
+    return origins, settings.cors_allow_credentials
+
+
+_cors_origins, _cors_credentials = _cors_allow_origins_and_credentials()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
