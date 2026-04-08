@@ -77,52 +77,40 @@ def normalize_tiktok_username(value: str | None) -> str | None:
     return s.lstrip("@")
 
 
-def fetch_tiktok_apify(
-    username: str,
-    *,
-    token: str,
-    actor_id: str,
-    max_posts: int,
-) -> dict[str, Any] | None:
-    try:
-        from apify_client import ApifyClient
-    except ImportError:
-        logger.warning("apify_client no instalado")
-        return None
-
-    handle = username.strip().lstrip("@")
-    if not handle:
-        return None
-
-    n_fetch = max(1, int(max_posts))
-    run_input: dict[str, Any] = {
-        "excludePinnedPosts": False,
-        "profiles": [handle],
-        "profileSorting": "latest",
-        "resultsPerPage": n_fetch,
-        "shouldDownloadAvatars": False,
-        "shouldDownloadCovers": False,
-        "shouldDownloadSlideshowImages": False,
-        "shouldDownloadSubtitles": False,
-        "shouldDownloadVideos": False,
-    }
-    client = ApifyClient(token)
-    try:
-        run = client.actor(actor_id).call(run_input=run_input)
-        ds = run.get("defaultDatasetId")
-        if not ds:
-            return None
-        items: list[dict[str, Any]] = []
-        for it in client.dataset(ds).iterate_items():
-            if isinstance(it, dict):
-                items.append(it)
-        return _tiktok_aggregate_from_posts(items, max_posts=n_fetch)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Apify TikTok error %s: %s", handle, e)
-        return None
+def tiktok_profile_cache_key(handle: str) -> str:
+    """Clave estable para caché (mismo criterio que fetch_tiktok_profiles)."""
+    return handle.strip().lstrip("@").lower()
 
 
-def _tiktok_aggregate_from_posts(
+def _tiktok_author_key(item: dict[str, Any]) -> str:
+    """Identifica el perfil dueño de un post (dataset mezclado cuando hay varios `profiles`)."""
+    am = item.get("authorMeta") if isinstance(item.get("authorMeta"), dict) else {}
+    for k in ("name", "uniqueId"):
+        v = am.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip().lower()
+    for fk in ("input", "profileUsername"):
+        v = item.get(fk)
+        if v is not None and str(v).strip():
+            return str(v).strip().lstrip("@").lower()
+    return ""
+
+
+def _tiktok_group_items_by_author(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        k = _tiktok_author_key(it)
+        if not k:
+            continue
+        groups.setdefault(k, []).append(it)
+    for lst in groups.values():
+        lst.sort(key=lambda x: int(x.get("createTime") or 0), reverse=True)
+    return groups
+
+
+def _tiktok_aggregate_from_post_items(
     items: list[dict[str, Any]],
     *,
     max_posts: int,
@@ -186,6 +174,103 @@ def _tiktok_aggregate_from_posts(
         "_engagement_pct": round(pct, 4),
         "_latest_content_at": str(latest_at or ""),
     }
+
+
+def _tiktok_aggregate_from_posts(
+    items: list[dict[str, Any]],
+    *,
+    max_posts: int,
+) -> dict[str, Any] | None:
+    """Compat: un solo perfil (todos los items son del mismo autor)."""
+    return _tiktok_aggregate_from_post_items(items, max_posts=max_posts)
+
+
+def fetch_tiktok_apify_batch(
+    handles: list[str],
+    *,
+    token: str,
+    actor_id: str,
+    max_posts: int,
+    results_per_page_cap: int,
+) -> dict[str, dict[str, Any] | None] | None:
+    """
+    Un run de Apify con `profiles: [h1, h2, ...]`.
+    Devuelve mapa cache_key (handle en minúsculas) -> dict agregado o None por perfil.
+    Devuelve None si falla el run completo.
+    """
+    profiles = [h.strip().lstrip("@") for h in handles if h and str(h).strip()]
+    if not profiles:
+        return {}
+
+    try:
+        from apify_client import ApifyClient
+    except ImportError:
+        logger.warning("apify_client no instalado")
+        return None
+
+    n = len(profiles)
+    per = max(1, int(max_posts))
+    results_per_page = min(max(1, results_per_page_cap), max(1, per * n))
+
+    run_input: dict[str, Any] = {
+        "excludePinnedPosts": False,
+        "profiles": profiles,
+        "profileSorting": "latest",
+        "resultsPerPage": 2,
+        "shouldDownloadAvatars": False,
+        "shouldDownloadCovers": False,
+        "shouldDownloadSlideshowImages": False,
+        "shouldDownloadSubtitles": False,
+        "shouldDownloadVideos": False,
+    }
+    client = ApifyClient(token)
+    try:
+        run = client.actor(actor_id).call(run_input=run_input)
+        ds = run.get("defaultDatasetId")
+        if not ds:
+            return None
+        items: list[dict[str, Any]] = []
+        for it in client.dataset(ds).iterate_items():
+            if isinstance(it, dict):
+                items.append(it)
+        groups = _tiktok_group_items_by_author(items)
+        out: dict[str, dict[str, Any] | None] = {}
+        for h in profiles:
+            ck = tiktok_profile_cache_key(h)
+            posts = groups.get(ck)
+            if not posts:
+                for gk, gl in groups.items():
+                    if gk == ck or gk.rstrip(".") == ck:
+                        posts = gl
+                        break
+            out[ck] = _tiktok_aggregate_from_post_items(posts, max_posts=per) if posts else None
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Apify TikTok batch error (%s perfiles): %s", len(profiles), e)
+        return None
+
+
+def fetch_tiktok_apify(
+    username: str,
+    *,
+    token: str,
+    actor_id: str,
+    max_posts: int,
+) -> dict[str, Any] | None:
+    handle = username.strip().lstrip("@")
+    if not handle:
+        return None
+    ck = tiktok_profile_cache_key(handle)
+    got = fetch_tiktok_apify_batch(
+        [handle],
+        token=token,
+        actor_id=actor_id,
+        max_posts=max_posts,
+        results_per_page_cap=max(500, max(1, int(max_posts)) * 3),
+    )
+    if not got:
+        return None
+    return got.get(ck)
 
 
 def flatten_tiktok_item(item: dict[str, Any], *, source: str) -> dict[str, Any]:

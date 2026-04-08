@@ -55,6 +55,57 @@ _PHRASE_PREFIXES: tuple[str, ...] = (
     "i am"
 )
 
+# Frases que no son persona: mostrar @handle en full_name y first_name (p. ej. cuenta de viajes).
+_BRAND_PHRASES_USE_AT_USERNAME: frozenset[str] = frozenset(
+    {
+        "epic world",
+    }
+)
+
+# Frases basura en archivo → intentar reconstruir desde handle (Instagram/TikTok/username).
+_GARBAGE_PHRASES_TRY_HANDLE_SPLIT: frozenset[str] = frozenset(
+    {
+        "bad child",
+    }
+)
+
+# Nombres propios comunes (minúsculas) para partir handles pegados tipo aaroncmoten → Aaron + Cmoten.
+# Orden de matching: más largo primero (p. ej. "daniel" antes que "dan").
+_COMMON_FIRST_NAMES_RAW = """
+aaron abigail adam addison adrian aiden alan albert alex alexander alexis alice alicia allison alyssa
+amanda amber amy andrea angel angela ann anna anne annie anthony antonio aria arthur ashley audrey
+austin autumn ava avery barbara beatrice ben benjamin bernard beth betty beverly bianca blake bradley
+brandon brenda brian brianna brittany brooke bruce bryan caleb cameron carl carlos carol caroline
+carolyn casey catherine cathy charles charlotte chloe chris christian christine christopher claire
+clara claudia cody colin connor courtney craig crystal cynthia daisy dale dan daniel david dawn dean
+deborah debra denise dennis derek diana diane don donald donna doris dorothy douglas dylan edward
+eleanor elizabeth ella emily emma eric erica erin ethan eugene eva evan eve evelyn faith felix fernando
+florence frances francis frank fred gabriel gary gavin gene george georgia gerald geraldine gina
+gloria grace graham gregory hannah harold harry hazel heather helen henry holly howard hugo ian irene
+isaac isabel isabella jack jackson jacob jade jake james jamie jan janet janice jared jasmine jason
+javier jean jeff jeffrey jennifer jeremy jerry jesse jessica jill joan joann joe joel john johnny
+jonathan johnson jordan jorge jose joseph joshua joyce juan judith judy julia julian julie justin karen kate
+katherine kathleen kathryn katie kay keith kelly ken kenneth kevin kim kimberly kyle laura lauren
+lawrence leah lee leigh leo leon leonard leslie levi liam lillian linda lisa logan lois lori louis
+lucas lucy luis luke lydia lynn madison marcia margaret maria marie marilyn mario marissa mark
+martha martin marvin mary mason matthew maureen max megan melissa michael michelle miguel mike
+miranda monica nancy naomi natalie nathan neil nicole nina noah nora norman olive oliver olivia
+oscar owen pamela patricia patrick paul paula peggy peter philip phillip rachel ralph randall randy
+raymond rebecca regina richard rita robert robin roger ronald rose roy ruby russell ruth ryan sam
+samantha samuel sara sarah scott sean shane shannon sharon shawn sheila shirley sophia stanley
+stephanie stephen steve steven sue susan sylvia tammy taylor teresa terry theodore thomas timothy
+tina todd tom tony tracey tracy travis tyler valerie vanessa veronica victor victoria vincent
+virginia walter wayne wendy william willie yvonne zachary
+"""
+
+_COMMON_FIRST_NAMES: frozenset[str] = frozenset(
+    w for w in _COMMON_FIRST_NAMES_RAW.split() if len(w) >= 2
+)
+_KNOWN_FIRST_BY_LEN: tuple[str, ...] = tuple(sorted(_COMMON_FIRST_NAMES, key=len, reverse=True))
+
+# Mínimo de letras del “apellido” al partir por prefijo (evita john+son).
+_MIN_REMAINDER_AFTER_FIRST_NAME: int = 4
+
 # Inicios tipo marca / frase comercial → fallback a username.
 _BRANDISH_STARTS: tuple[str, ...] = (
     "home of ",
@@ -191,19 +242,31 @@ def _bio_name_candidate(bio: str) -> str:
 
 
 def pick_primary_raw(
-    full_name: str, email: Any, bio: str
+    full_name: str,
+    first_name: str,
+    last_name: str,
+    email: Any,
+    bio: str,
 ) -> tuple[str, str]:
-    """Devuelve (texto crudo a parsear, fuente: full_name|email_local|instagram_bio)."""
+    """Devuelve (texto crudo a parsear, fuente: full_name|first_last_combo|first_name|email_local|…)."""
     fn = _safe_str(full_name)
-    if fn and clean_display_string(fn):
+    if fn and not _is_placeholder_full_name(fn) and clean_display_string(fn):
         return fn, "full_name"
+    fp = _safe_str(first_name)
+    lp = _safe_str(last_name)
+    if fp and lp:
+        combo = f"{fp} {lp}".strip()
+        if combo and clean_display_string(combo):
+            return combo, "first_last_combo"
+    if fp and clean_display_string(fp):
+        return fp, "first_name"
     eg = _infer_from_email_local(_safe_str(email))
     if eg:
         return eg, "email_local"
     bc = _bio_name_candidate(_safe_str(bio))
     if bc:
         return bc, "instagram_bio"
-    if fn:
+    if fn and not _is_placeholder_full_name(fn):
         return fn, "full_name"
     return "", ""
 
@@ -213,6 +276,88 @@ def _brandish_line(tokens: list[str], lowered_joined: str) -> bool:
         if lowered_joined.startswith(p):
             return True
     return False
+
+
+def _phrase_key(tokens: list[str]) -> str:
+    return " ".join(t.lower() for t in tokens if t).strip()
+
+
+def _is_placeholder_full_name(s: str) -> bool:
+    t = _safe_str(s).strip()
+    if not t:
+        return True
+    low = t.lower()
+    dash_like = frozenset({"—", "-", "–", "―", "‒", "−"})
+    if low in {"", "n/a", "na", "none", "null", "nan"}:
+        return True
+    if t in dash_like or (len(t) <= 2 and all(c in dash_like or c.isspace() for c in t)):
+        return True
+    if all(c in "—-–_.·|" for c in t):
+        return True
+    return False
+
+
+def _cap_word(w: str) -> str:
+    w = w.strip()
+    if not w:
+        return w
+    return w[0].upper() + w[1:].lower() if len(w) > 1 else w.upper()
+
+
+def _split_handle_to_given_family(handle: str) -> tuple[str, str] | None:
+    """
+    Parte handles pegados (aaroncmoten, aaronCmoten) en (nombre, apellido).
+    No aplica a handles con punto tipo epicworld.travel (cuenta marca).
+    """
+    h = _safe_str(handle).lstrip("@").strip()
+    if len(h) < 5:
+        return None
+    if "." in h:
+        return None
+    if not h.replace("_", "").replace("-", "").isalnum():
+        return None
+
+    expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", h)
+    expanded = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", expanded)
+    parts = expanded.replace("_", " ").replace("-", " ").split()
+    if len(parts) >= 2 and all(len(p) >= 2 for p in parts[:2]):
+        first = _cap_word(parts[0])
+        last = _cap_word("".join(parts[1:])) if len(parts) == 2 else " ".join(_cap_word(x) for x in parts[1:])
+        return first, last
+
+    low = h.lower()
+    for name in _KNOWN_FIRST_BY_LEN:
+        if len(name) < 4:
+            continue
+        if not low.startswith(name):
+            continue
+        rest = low[len(name) :]
+        if len(rest) < _MIN_REMAINDER_AFTER_FIRST_NAME:
+            continue
+        return _cap_word(name), _cap_word(rest)
+    return None
+
+
+def _handle_for_name_split(row: pd.Series) -> str:
+    for key in ("username", "instagram_username"):
+        u = _safe_str(row.get(key)).lstrip("@")
+        if u:
+            return u
+    raw_tt = row.get("tiktok_username")
+    if raw_tt is not None and not (isinstance(raw_tt, float) and pd.isna(raw_tt)):
+        from app.utils.tiktok_profile import normalize_tiktok_username
+
+        tt = normalize_tiktok_username(str(raw_tt).strip()) or ""
+        if tt:
+            return tt
+    return ""
+
+
+def _looks_like_merged_person_token(token: str) -> bool:
+    t = token.strip()
+    if len(t) < 8:
+        return False
+    return t.isalpha()
 
 
 def should_fallback_to_username(cleaned: str, tokens: list[str]) -> bool:
@@ -271,7 +416,7 @@ def _should_prefer_ig_full_name(cur: str, ig: str) -> bool:
     if not ig or len(ig.strip()) < 2:
         return False
     cur = cur.strip()
-    if not cur:
+    if not cur or _is_placeholder_full_name(cur):
         return True
     parts = cur.split()
     if parts and len(parts[0]) == 1 and parts[0].isalpha() and parts[0].islower():
@@ -284,21 +429,48 @@ def _should_prefer_ig_full_name(cur: str, ig: str) -> bool:
 def process_name_row(row: pd.Series) -> tuple[str, str, str, str]:
     """
     Devuelve (full_name_display, first_name, last_name, source).
-    source ∈ full_name | ig_full_name_raw | email_local | instagram_bio | username_fallback | kept_first_name
+    source ∈ full_name | first_last_combo | first_name | ig_full_name_raw | email_local | instagram_bio |
+    username_brand_phrase | username_handle_split | merged_name_split | username_fallback | kept_first_name
     """
     username = row.get("username")
     email = row.get("email")
     bio = row.get("instagram_bio")
     full_orig = _safe_str(row.get("full_name"))
     first_orig = _safe_str(row.get("first_name"))
+    last_orig = _safe_str(row.get("last_name"))
     ig_fn = _safe_str(row.get("ig_full_name_raw"))
 
     if ig_fn and _should_prefer_ig_full_name(full_orig, ig_fn):
         raw, src = ig_fn, "ig_full_name_raw"
     else:
-        raw, src = pick_primary_raw(full_orig, email, bio)
+        raw, src = pick_primary_raw(full_orig, first_orig, last_orig, email, bio)
     cleaned = clean_display_string(raw) if raw else ""
     tokens = cleaned.split() if cleaned else []
+    phrase = _phrase_key(tokens)
+
+    if phrase in _BRAND_PHRASES_USE_AT_USERNAME:
+        h = _handle_for_name_split(row)
+        ff, fn = _username_display(h)
+        if ff:
+            return ff, fn, "", "username_brand_phrase"
+
+    if phrase in _GARBAGE_PHRASES_TRY_HANDLE_SPLIT:
+        h = _handle_for_name_split(row)
+        split = _split_handle_to_given_family(h)
+        if split:
+            f, l = split
+            full = f"{f} {l}".strip()
+            return full, f, l, "username_handle_split"
+        ff, fn = _username_display(h)
+        if ff:
+            return ff, fn, "", "username_fallback"
+
+    if len(tokens) == 1 and _looks_like_merged_person_token(tokens[0]):
+        split_t = _split_handle_to_given_family(tokens[0])
+        if split_t:
+            f, l = split_t
+            full = f"{f} {l}".strip()
+            return full, f, l, "merged_name_split"
 
     if should_fallback_to_username(cleaned, tokens):
         ff, fn = _username_display(_safe_str(username))

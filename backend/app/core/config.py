@@ -67,12 +67,18 @@ class Settings(BaseSettings):
     apify_api_token: str = ""
     apify_instagram_actor_id: str = "shu8hvrXbJbY3Eb9W"
     apify_instagram_delay_seconds: float = 1.0
+    # Perfiles por run de Apify (directUrls[]). Más alto = menos runs y menos cola
+    instagram_apify_batch_size: int = 35
+    instagram_apify_batch_results_limit_cap: int = 8000
 
     # Apify — TikTok Scraper (actor por defecto documentación del uso de cliente de Apify).
     apify_tiktok_actor_id: str = "0FXVyOXXEmdGcV88a"
     apify_tiktok_delay_seconds: float = 1.0
     tiktok_engagement_post_sample_max: int = 5
     tiktok_max_profiles_per_run: int = 100
+    # Varios usernames en un solo run (`profiles: [...]`). Si el actor no lo soporta, usar 1.
+    tiktok_apify_batch_size: int = 35
+    tiktok_apify_results_per_page_cap: int = 5000
 
     # Instaloader (fallback si no hay token Apify). NO commitear credenciales.
     instagram_login_user: str = ""

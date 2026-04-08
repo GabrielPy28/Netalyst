@@ -70,6 +70,213 @@ def _engagement_from_posts(followers: int, posts: list[dict[str, Any]], max_post
     return likes, comments, n, round(pct, 4)
 
 
+def instagram_profile_cache_key(profile_url: str) -> str:
+    return str(profile_url).strip().lower().split("?")[0]
+
+
+def _owner_username_lower(item: dict[str, Any]) -> str:
+    for getter in (
+        lambda i: i.get("ownerUsername"),
+        lambda i: (i.get("owner") or {}).get("username") if isinstance(i.get("owner"), dict) else None,
+        lambda i: i.get("username"),
+    ):
+        v = getter(item)
+        if v is not None and str(v).strip():
+            return str(v).strip().lower()
+    return ""
+
+
+def _aggregate_apify_posts_to_profile_blobs(
+    items: list[dict[str, Any]],
+    profile_urls: list[str],
+    max_posts: int,
+) -> dict[str, dict[str, Any]]:
+    """
+    Agrupa filas del dataset (posts) por dueño y construye un dict compatible con
+    flatten_instagram_item (latestPosts + campos de perfil).
+    Las claves son username en minúsculas.
+    """
+    handles_expected: set[str] = set()
+    for u in profile_urls:
+        h = (parse_instagram_handle_from_url(u) or "").strip().lower()
+        if h:
+            handles_expected.add(h)
+
+    posts_by_owner: dict[str, list[dict[str, Any]]] = {}
+    profile_like: dict[str, dict[str, Any]] = {}
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        un = _owner_username_lower(it)
+        if not un or (handles_expected and un not in handles_expected):
+            continue
+        short = it.get("shortCode") or it.get("shortcode")
+        typ = str(it.get("type") or "")
+        tlow = typ.lower()
+        is_likely_post = bool(short) or tlow in (
+            "image",
+            "video",
+            "sidecar",
+            "graphsidecar",
+            "graphimage",
+            "graphvideo",
+            "clips",
+        )
+
+        if is_likely_post:
+            posts_by_owner.setdefault(un, []).append(it)
+        elif un in handles_expected:
+            profile_like[un] = it
+
+    def _followers_int(*candidates: Any) -> int:
+        for c in candidates:
+            if c is None:
+                continue
+            if isinstance(c, dict) and "count" in c:
+                try:
+                    n = int(c["count"])
+                    if n >= 0:
+                        return n
+                except (TypeError, ValueError):
+                    continue
+            try:
+                n = int(c)
+                if n >= 0:
+                    return n
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    out: dict[str, dict[str, Any]] = {}
+    for h in handles_expected:
+        posts = posts_by_owner.get(h, [])
+        posts.sort(
+            key=lambda p: str(p.get("timestamp") or p.get("takenAtTimestamp") or ""),
+            reverse=True,
+        )
+        latest_posts: list[dict[str, Any]] = []
+        base = profile_like.get(h) or (posts[0] if posts else None)
+        raw_lp = base.get("latestPosts") if isinstance(base, dict) else None
+        if isinstance(raw_lp, list) and raw_lp and not posts:
+            for p in raw_lp[:max_posts]:
+                if isinstance(p, dict):
+                    latest_posts.append(
+                        {
+                            "likesCount": int(p.get("likesCount") or p.get("likes") or 0),
+                            "commentsCount": int(p.get("commentsCount") or p.get("comments") or 0),
+                            "timestamp": p.get("timestamp") or p.get("takenAtTimestamp"),
+                        }
+                    )
+        else:
+            for p in posts[:max_posts]:
+                latest_posts.append(
+                    {
+                        "likesCount": int(p.get("likesCount") or p.get("likes") or 0),
+                        "commentsCount": int(p.get("commentsCount") or p.get("comments") or 0),
+                        "timestamp": p.get("timestamp") or p.get("takenAtTimestamp"),
+                    }
+                )
+        if base is None:
+            continue
+        owner = base.get("owner")
+        prof: dict[str, Any] = owner if isinstance(owner, dict) else base
+
+        followers = _followers_int(
+            prof.get("followersCount"),
+            prof.get("edge_followed_by"),
+            base.get("followersCount"),
+        )
+        if followers <= 0 and posts:
+            o0 = posts[0].get("owner")
+            followers = _followers_int(
+                posts[0].get("followersCount"),
+                (o0 or {}).get("followersCount") if isinstance(o0, dict) else None,
+            )
+
+        username = str(prof.get("username") or h).strip() or h
+        edge_media = prof.get("edge_owner_to_timeline_media")
+        posts_count = 0
+        if isinstance(edge_media, dict) and edge_media.get("count") is not None:
+            try:
+                posts_count = int(edge_media["count"])
+            except (TypeError, ValueError):
+                posts_count = 0
+        if posts_count <= 0:
+            posts_count = _followers_int(prof.get("postsCount"), prof.get("mediaCount"))
+
+        synthetic: dict[str, Any] = {
+            "username": username,
+            "fullName": str(prof.get("fullName") or prof.get("fullname") or prof.get("full_name") or ""),
+            "biography": str(prof.get("biography") or ""),
+            "followersCount": followers,
+            "verified": bool(prof.get("verified") or prof.get("isVerified")),
+            "businessCategoryName": prof.get("businessCategoryName") or prof.get("category_name"),
+            "profilePicUrlHD": prof.get("profilePicUrlHD") or prof.get("profilePicUrl") or "",
+            "postsCount": posts_count,
+            "latestPosts": latest_posts,
+        }
+        if latest_posts or followers > 0 or synthetic["fullName"] or synthetic["biography"]:
+            out[h] = synthetic
+
+    return out
+
+
+def fetch_instagram_apify_batch(
+    profile_urls: list[str],
+    *,
+    token: str,
+    actor_id: str,
+    max_posts: int,
+    results_limit_cap: int,
+) -> dict[str, dict[str, Any] | None]:
+    """
+    Un solo run de Apify con varias `directUrls`. Devuelve mapa cache_key (URL normalizada) -> item
+    o None si falla el run completo. URLs sin datos en el dataset no aparecen en el mapa.
+    """
+    if not profile_urls:
+        return {}
+
+    try:
+        from apify_client import ApifyClient
+    except ImportError:
+        logger.warning("apify_client no instalado")
+        return None
+
+    n = len(profile_urls)
+    per = max(1, max_posts)
+    results_limit = min(max(1, results_limit_cap), max(1, per * n))
+
+    client = ApifyClient(token)
+    run_input: dict[str, Any] = {
+        "directUrls": profile_urls,
+        "resultsType": "details",
+        "resultsLimit": 2,
+        "searchLimit": 2,
+        "addParentData": True,
+        "searchType": "hashtag"
+    }
+    try:
+        run = client.actor(actor_id).call(run_input=run_input)
+        ds = run.get("defaultDatasetId")
+        if not ds:
+            return None
+        items = [it for it in client.dataset(ds).iterate_items() if isinstance(it, dict)]
+        by_handle = _aggregate_apify_posts_to_profile_blobs(items, profile_urls, max_posts)
+        out: dict[str, dict[str, Any] | None] = {}
+        for url in profile_urls:
+            ck = instagram_profile_cache_key(url)
+            h = (parse_instagram_handle_from_url(url) or "").strip().lower()
+            if not h:
+                out[ck] = None
+                continue
+            out[ck] = by_handle.get(h)
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Apify Instagram batch error (%s urls): %s", len(profile_urls), e)
+        return None
+
+
 def fetch_instagram_apify(
     profile_url: str,
     *,
@@ -77,34 +284,17 @@ def fetch_instagram_apify(
     actor_id: str,
     max_posts: int,
 ) -> dict[str, Any] | None:
-    try:
-        from apify_client import ApifyClient
-    except ImportError:
-        logger.warning("apify_client no instalado")
+    ck = instagram_profile_cache_key(profile_url)
+    got = fetch_instagram_apify_batch(
+        [profile_url],
+        token=token,
+        actor_id=actor_id,
+        max_posts=max_posts,
+        results_limit_cap=max(1000, max_posts * 2),
+    )
+    if not got:
         return None
-
-    client = ApifyClient(token)
-    run_input: dict[str, Any] = {
-        "directUrls": [profile_url],
-        "resultsType": "posts",
-        "resultsLimit": max(1, max_posts),
-        "addParentData": True,
-    }
-    try:
-        run = client.actor(actor_id).call(run_input=run_input)
-        ds = run.get("defaultDatasetId")
-        if not ds:
-            return None
-        item: dict[str, Any] | None = None
-        for it in client.dataset(ds).iterate_items():
-            if isinstance(it, dict) and it.get("username"):
-                item = it
-                break
-            item = it if isinstance(it, dict) else item
-        return item
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Apify Instagram error %s: %s", profile_url, e)
-        return None
+    return got.get(ck) if isinstance(got, dict) else None
 
 
 def fetch_instagram_instaloader(

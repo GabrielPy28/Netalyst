@@ -17,8 +17,10 @@ from app.services.validation_context import ValidationContext
 from app.utils.instagram_profile import (
     empty_ig_row,
     fetch_instagram_apify,
+    fetch_instagram_apify_batch,
     fetch_instagram_instaloader,
     flatten_instagram_item,
+    instagram_profile_cache_key,
     normalize_instagram_profile_url,
     parse_instagram_handle_from_url,
 )
@@ -26,9 +28,11 @@ from app.utils.name_cleaning import maybe_refresh_names_from_instagram_fetch
 from app.utils.tiktok_profile import (
     empty_tt_row,
     fetch_tiktok_apify,
+    fetch_tiktok_apify_batch,
     flatten_tiktok_item,
     infer_tiktok_vertical_category,
     normalize_tiktok_username,
+    tiktok_profile_cache_key,
 )
 from app.utils.youtube_channel import (
     empty_yt_row,
@@ -167,6 +171,71 @@ def fetch_instagram_profiles(ctx: ValidationContext) -> ValidationContext:
     if not token:
         loader = _ensure_instaloader()
 
+    if token:
+        pending_urls: list[str] = []
+        seen_ck: set[str] = set()
+        scan_i = 0
+        for _, row in df.iterrows():
+            if scan_i >= max_rows:
+                break
+            scan_i += 1
+            pu = _row_profile_url(row)
+            if not pu:
+                continue
+            ck = instagram_profile_cache_key(pu)
+            if ck in apify_cache:
+                continue
+            if ck in seen_ck:
+                continue
+            seen_ck.add(ck)
+            pending_urls.append(pu)
+
+        batch_size = max(1, int(settings.instagram_apify_batch_size))
+        results_cap = int(settings.instagram_apify_batch_results_limit_cap)
+        for bi in range(0, len(pending_urls), batch_size):
+            chunk = pending_urls[bi : bi + batch_size]
+            batch = fetch_instagram_apify_batch(
+                chunk,
+                token=token,
+                actor_id=actor,
+                max_posts=max_posts,
+                results_limit_cap=results_cap,
+            )
+            if batch is None:
+                for url in chunk:
+                    ck = instagram_profile_cache_key(url)
+                    if ck in apify_cache:
+                        continue
+                    one = fetch_instagram_apify(
+                        url,
+                        token=token,
+                        actor_id=actor,
+                        max_posts=max_posts,
+                    )
+                    if one is not None:
+                        apify_cache[ck] = one
+                    time.sleep(settings.apify_instagram_delay_seconds)
+            else:
+                for url in chunk:
+                    ck = instagram_profile_cache_key(url)
+                    it = batch.get(ck)
+                    if it is not None:
+                        apify_cache[ck] = it
+                for url in chunk:
+                    ck = instagram_profile_cache_key(url)
+                    if ck in apify_cache:
+                        continue
+                    one = fetch_instagram_apify(
+                        url,
+                        token=token,
+                        actor_id=actor,
+                        max_posts=max_posts,
+                    )
+                    if one is not None:
+                        apify_cache[ck] = one
+                    time.sleep(settings.apify_instagram_delay_seconds)
+            time.sleep(settings.apify_instagram_delay_seconds)
+
     rows_out: list[dict[str, Any]] = []
     n_apify = n_il = n_skip = n_err = 0
     processed = 0
@@ -189,7 +258,7 @@ def fetch_instagram_profiles(ctx: ValidationContext) -> ValidationContext:
         source_used = ""
 
         if token:
-            cache_key = profile_url.lower().split("?")[0]
+            cache_key = instagram_profile_cache_key(profile_url)
             cached = apify_cache.get(cache_key)
             if cached is not None:
                 item = cached
@@ -258,6 +327,9 @@ def fetch_tiktok_profiles(ctx: ValidationContext) -> ValidationContext:
     """
     Por cada fila con tiktok_username (o URL de perfil), obtiene posts vía Apify
     y calcula engagement: ((likes + comentarios + shares) / seguidores) × 100.
+
+    Antes del bucle por fila, los handles únicos se agrupan en lotes (`profiles: [...]`)
+    para reducir runs de Apify (misma idea que Instagram con directUrls).
     """
     key = "fetch_tiktok_profiles"
     df = ctx.df.copy()
@@ -275,6 +347,61 @@ def fetch_tiktok_profiles(ctx: ValidationContext) -> ValidationContext:
             df[col] = val
         ctx.df = df
         return ctx
+
+    pending_handles: list[str] = []
+    seen_tt: set[str] = set()
+    scan_tt = 0
+    for _, row in df.iterrows():
+        if scan_tt >= max_rows:
+            break
+        scan_tt += 1
+        raw = row.get("tiktok_username")
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)) or not str(raw).strip():
+            continue
+        handle = normalize_tiktok_username(str(raw).strip())
+        if not handle:
+            continue
+        ck = tiktok_profile_cache_key(handle)
+        if ck in cache or ck in seen_tt:
+            continue
+        seen_tt.add(ck)
+        pending_handles.append(handle)
+
+    batch_size = max(1, int(settings.tiktok_apify_batch_size))
+    results_cap = int(settings.tiktok_apify_results_per_page_cap)
+    for bi in range(0, len(pending_handles), batch_size):
+        chunk = pending_handles[bi : bi + batch_size]
+        batch = fetch_tiktok_apify_batch(
+            chunk,
+            token=token,
+            actor_id=actor,
+            max_posts=max_posts,
+            results_per_page_cap=results_cap,
+        )
+        if batch is None:
+            for h in chunk:
+                ck = tiktok_profile_cache_key(h)
+                if ck in cache:
+                    continue
+                one = fetch_tiktok_apify(h, token=token, actor_id=actor, max_posts=max_posts)
+                if one is not None:
+                    cache[ck] = one
+                time.sleep(settings.apify_tiktok_delay_seconds)
+        else:
+            for h in chunk:
+                ck = tiktok_profile_cache_key(h)
+                it = batch.get(ck)
+                if it is not None:
+                    cache[ck] = it
+            for h in chunk:
+                ck = tiktok_profile_cache_key(h)
+                if ck in cache:
+                    continue
+                one = fetch_tiktok_apify(h, token=token, actor_id=actor, max_posts=max_posts)
+                if one is not None:
+                    cache[ck] = one
+                time.sleep(settings.apify_tiktok_delay_seconds)
+        time.sleep(settings.apify_tiktok_delay_seconds)
 
     rows_out: list[dict[str, Any]] = []
     n_ok = n_skip = n_err = 0
@@ -299,7 +426,7 @@ def fetch_tiktok_profiles(ctx: ValidationContext) -> ValidationContext:
             n_skip += 1
             continue
 
-        cache_key = handle.lower()
+        cache_key = tiktok_profile_cache_key(handle)
         cached = cache.get(cache_key)
         if cached is not None:
             item = cached
