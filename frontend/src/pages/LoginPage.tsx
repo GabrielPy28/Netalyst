@@ -2,24 +2,34 @@ import { motion } from "framer-motion";
 import { FormEvent, useEffect, useState } from "react";
 import { FcGoogle } from "react-icons/fc";
 import { HiOutlineMail, HiOutlineLockClosed } from "react-icons/hi";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import { loginRequest } from "@/api/auth";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { LOGO_URL } from "@/lib/constants";
-import { getToken, setSession } from "@/lib/authStorage";
+import { getToken, isTokenValid, setSession } from "@/lib/authStorage";
+
+type LoginLocationState = {
+  from?: { pathname?: string; search?: string; hash?: string };
+};
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const state = (location.state ?? null) as LoginLocationState | null;
+  const fromPath = state?.from?.pathname ?? "/welcome";
+  const fromSearch = state?.from?.search ?? "";
+  const fromHash = state?.from?.hash ?? "";
+  const redirectTo = `${fromPath}${fromSearch}${fromHash}`;
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (getToken()) navigate("/welcome", { replace: true });
-  }, [navigate]);
+    if (isTokenValid(getToken())) navigate(redirectTo, { replace: true });
+  }, [navigate, redirectTo]);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -35,7 +45,7 @@ export function LoginPage() {
         showConfirmButton: false,
         customClass: { popup: "netalyst-swal" },
       });
-      navigate("/welcome", { replace: true });
+      navigate(redirectTo, { replace: true });
     } catch (err) {
       await Swal.fire({
         icon: "error",

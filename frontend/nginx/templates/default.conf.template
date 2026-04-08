@@ -1,0 +1,35 @@
+# Generado en el arranque del contenedor desde variables de entorno (imagen oficial nginx).
+#
+# NETALYST_API_ORIGIN — origen del API **sin** barra final. Ejemplos:
+#   Docker Compose (servicio api):  http://api:8000
+#   Producción (Railway):           https://netalyst-production.up.railway.app
+#
+# El front llama rutas bajo /api/v1/... (VITE_API_BASE=/api/v1); este bloque reenvía /api/ al backend.
+
+server {
+    listen 80;
+    server_name localhost;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Un solo prefijo: suficiente para JSON, SSE y ZIP (timeouts largos para validación pesada).
+    location /api/ {
+        proxy_pass ${NETALYST_API_ORIGIN}/api/;
+        proxy_http_version 1.1;
+        # Host/SNI del backend (Railway u api:8000), no el del front; si no, el origen remoto puede rechazar la petición.
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization $http_authorization;
+        proxy_ssl_server_name on;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_connect_timeout 75s;
+    }
+}

@@ -6,6 +6,7 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
+from app.core.config import settings
 from app.core.security import get_current_user_id
 from app.schemas.validation import CriterionRunOut, ValidationUploadResponse
 from app.services.file_ingest import read_uploaded_table
@@ -119,6 +120,10 @@ def upload_and_validate(
         excluded_rows=n_ex,
         columns=list(out_df.columns.astype(str)),
         criteria=criteria,
-        preview=dataframe_preview_json(out_df),
-        excluded_preview=dataframe_preview_json(ex_df) if ex_df is not None and n_ex else [],
+        preview=dataframe_preview_json(out_df, max_rows=settings.validation_preview_max_rows),
+        excluded_preview=dataframe_preview_json(ex_df, max_rows=settings.validation_preview_max_rows)
+        if ex_df is not None and n_ex
+        else [],
+        preview_truncated=len(out_df) > settings.validation_preview_max_rows,
+        excluded_preview_truncated=n_ex > settings.validation_preview_max_rows,
     )

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.db_models import Criterion, CriterionStep, Program
+from app.core.config import settings
 from app.services.validation_context import ValidationContext
 from app.utils.step_registry import get_step_function
 
@@ -175,10 +176,15 @@ def iter_validation_sse_events(
         "excluded_rows": n_ex,
         "columns": list(ctx.df.columns.astype(str)),
         "criteria": criteria_results,
-        "preview": dataframe_preview_json(ctx.df),
-        "excluded_preview": dataframe_preview_json(ctx.df_excluded)
+        "preview": dataframe_preview_json(ctx.df, max_rows=settings.validation_preview_max_rows),
+        "excluded_preview": dataframe_preview_json(
+            ctx.df_excluded,
+            max_rows=settings.validation_preview_max_rows,
+        )
         if ctx.df_excluded is not None and n_ex
         else [],
+        "preview_truncated": len(ctx.df) > settings.validation_preview_max_rows,
+        "excluded_preview_truncated": n_ex > settings.validation_preview_max_rows,
     }
 
 

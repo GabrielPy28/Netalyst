@@ -32,9 +32,17 @@ class ValidationUploadResponse(BaseModel):
     columns: list[str]
     criteria: list[CriterionRunOut]
     preview: list[dict[str, Any]] = Field(
-        description="Todas las filas de creadores válidos (post-validación), para vista y export en cliente."
+        description="Preview de filas válidas (puede truncarse para evitar payloads excesivos)."
     )
     excluded_preview: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="Todas las filas excluidas (si hay), con exclusion_stage / exclusion_reason.",
+        description="Preview de filas excluidas (puede truncarse para evitar payloads excesivos).",
+    )
+    preview_truncated: bool = Field(
+        default=False,
+        description="True si preview no incluye todas las filas válidas.",
+    )
+    excluded_preview_truncated: bool = Field(
+        default=False,
+        description="True si excluded_preview no incluye todas las filas excluidas.",
     )

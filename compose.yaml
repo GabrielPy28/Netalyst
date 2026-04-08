@@ -38,5 +38,9 @@ services:
     container_name: netalyst-web
     ports:
       - "5173:80"
+    # Por defecto el Dockerfile usa NETALYST_API_ORIGIN=http://api:8000 (servicio api).
+    # Para que Nginx apunte al API en Railway, descomenta:
+    # environment:
+    #   NETALYST_API_ORIGIN: https://netalyst-production.up.railway.app
     depends_on:
       - api

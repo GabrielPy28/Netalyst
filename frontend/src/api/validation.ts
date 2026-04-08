@@ -35,6 +35,10 @@ export type ValidationUploadResponse = {
   preview: Record<string, unknown>[];
   /** Todas las filas excluidas. */
   excluded_preview: Record<string, unknown>[];
+  /** True cuando el backend limita el preview por volumen. */
+  preview_truncated?: boolean;
+  /** True cuando el backend limita el preview excluido por volumen. */
+  excluded_preview_truncated?: boolean;
 };
 
 export type ValidationStreamEvent =
@@ -172,4 +176,23 @@ export async function uploadValidationJson(
     throw new Error(errorFromBody(data) || res.statusText);
   }
   return data as unknown as ValidationUploadResponse;
+}
+
+export async function uploadValidationZip(programId: string, file: File): Promise<Blob> {
+  const token = getToken();
+  if (!token) throw new Error("Sesión requerida");
+  const fd = new FormData();
+  fd.append("program_id", programId);
+  fd.append("file", file);
+  fd.append("response_mode", "zip");
+  const res = await fetch(`${apiBase}/validation/upload`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: fd,
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    throw new Error(errorFromBody(data) || res.statusText);
+  }
+  return res.blob();
 }

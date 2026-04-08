@@ -1,14 +1,17 @@
 from collections.abc import Generator
+import logging
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import HTTPException, status
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 
 _engine = None
 _SessionLocal: sessionmaker[Session] | None = None
+logger = logging.getLogger(__name__)
 
 # psycopg2 no acepta en el DSN opciones que Supabase añade para PgBouncer u otros clientes.
 _PSQL_QUERY_PARAMS_SKIP = frozenset(
@@ -81,7 +84,29 @@ def get_db() -> Generator[Session, None, None]:
     try:
         yield db
     finally:
-        db.close()
+        try:
+            db.close()
+        except SQLAlchemyError as e:
+            # En streams largos (SSE), la conexión al proveedor puede expirar y lanzar
+            # OperationalError al cerrar/rollback. No debe romper la respuesta ya enviada.
+            logger.warning("Error closing DB session; suppressing at request teardown: %s", e)
+
+
+def _pg_column_exists(conn, *, table: str, column: str) -> bool:
+    row = conn.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = :table
+              AND column_name = :column
+            LIMIT 1
+            """
+        ),
+        {"table": table, "column": column},
+    ).first()
+    return row is not None
 
 
 def init_db_schema() -> None:
@@ -101,7 +126,21 @@ def init_db_schema() -> None:
         Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     # create_all no altera tablas ya creadas: columnas nuevas del ORM requieren DDL explícito.
-    with engine.begin() as conn:
-        conn.execute(
-            text("ALTER TABLE criteria ADD COLUMN IF NOT EXISTS template_slug TEXT")
+    # Supabase/pooler a veces corta DDL; si la columna ya existe (migración hecha o tabla nueva), no hacemos ALTER.
+    try:
+        with engine.begin() as conn:
+            if _pg_column_exists(conn, table="criteria", column="template_slug"):
+                return
+            conn.execute(text("SET LOCAL statement_timeout = '300s'"))
+            conn.execute(
+                text(
+                    "ALTER TABLE criteria ADD COLUMN IF NOT EXISTS template_slug TEXT"
+                )
+            )
+    except OperationalError as e:
+        logger.warning(
+            "No se pudo aplicar migración de template_slug al iniciar (timeout o bloqueo). "
+            "Ejecuta en SQL: ALTER TABLE criteria ADD COLUMN IF NOT EXISTS template_slug TEXT. "
+            "Detalle: %s",
+            e,
         )

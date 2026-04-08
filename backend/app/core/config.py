@@ -89,6 +89,8 @@ class Settings(BaseSettings):
     # Umbral de aprobación del score 0–16 y mínimo de seguidores (criterio redes).
     creator_min_approval_score: float = 8.0
     creator_min_followers_for_approval: int = 100_000
+    # Límite de filas serializadas en respuestas JSON/SSE para evitar payloads gigantes.
+    validation_preview_max_rows: int = 4000
 
     @field_validator(
         "supabase_url",

@@ -14,7 +14,7 @@ import Swal from "sweetalert2";
 import type { ProgramDetail } from "@/api/programs";
 import { fetchProgram } from "@/api/programs";
 import type { ValidationStreamEvent, ValidationUploadResponse } from "@/api/validation";
-import { uploadValidationStream } from "@/api/validation";
+import { uploadValidationStream, uploadValidationZip } from "@/api/validation";
 import { PaginatedResultTable } from "@/components/validation/PaginatedResultTable";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -39,6 +39,7 @@ export function ProgramValidatePage() {
   const [streamLog, setStreamLog] = useState<ValidationStreamEvent[]>([]);
   const [streamHeadline, setStreamHeadline] = useState("");
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [downloadingFullZip, setDownloadingFullZip] = useState(false);
   const streamLogRef = useRef<ValidationStreamEvent[]>([]);
   const validationAbortRef = useRef<AbortController | null>(null);
   const validationRunIdRef = useRef(0);
@@ -161,6 +162,31 @@ export function ProgramValidatePage() {
       if (runId === validationRunIdRef.current) {
         setRunning(false);
       }
+    }
+  }
+
+  async function onDownloadFullZip() {
+    if (!id || !file) return;
+    setDownloadingFullZip(true);
+    try {
+      const blob = await uploadValidationZip(id, file);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "creadores_resultado.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      await Swal.fire({
+        icon: "error",
+        title: "No se pudo descargar el ZIP completo",
+        text: e instanceof Error ? e.message : "Error",
+        customClass: { popup: "netalyst-swal" },
+      });
+    } finally {
+      setDownloadingFullZip(false);
     }
   }
 
@@ -355,6 +381,25 @@ export function ProgramValidatePage() {
                   {result.program_nombre} · {result.rows} filas válidas · {result.excluded_rows}{" "}
                   excluidas
                 </p>
+                {(result.preview_truncated || result.excluded_preview_truncated) && (
+                  <p className="mt-2 text-sm text-amber-300">
+                    Vista parcial por volumen alto. Se muestran filas limitadas para evitar cortes de
+                    red en archivos grandes.
+                  </p>
+                )}
+                <div className="mt-4">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="text-sm text-slate-100"
+                    disabled={downloadingFullZip || !file}
+                    onClick={onDownloadFullZip}
+                  >
+                    {downloadingFullZip
+                      ? "Generando ZIP completo..."
+                      : "Descargar ZIP completo (todos los registros)"}
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 <details className="rounded-lg border border-white/10 bg-slate-900/40 px-3 py-2 text-base text-slate-200">
