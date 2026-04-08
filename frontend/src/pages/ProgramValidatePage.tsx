@@ -110,6 +110,7 @@ export function ProgramValidatePage() {
     const ac = new AbortController();
     validationAbortRef.current = ac;
     setRunning(true);
+    const runStartedAt = Date.now();
     try {
       const data = await uploadValidationStream(
         id,
@@ -133,6 +134,18 @@ export function ProgramValidatePage() {
       const ytAdd = addYoutubeUnitsForSession(merged);
       setYoutubeLastEstimate(ytAdd > 0 ? ytAdd : undefined);
       setStreamHeadline("Completado");
+      const elapsed = formatElapsed(Date.now() - runStartedAt);
+      await Swal.fire({
+        icon: "success",
+        title: "Validación completada",
+        html: `<p class="text-base text-slate-200">${data.program_nombre}</p>
+<p class="mt-2 text-base"><strong>${data.rows}</strong> creadores válidos · <strong>${data.excluded_rows}</strong> excluidos</p>
+<p class="mt-2 text-sm text-slate-400">Tiempo total: ${elapsed}</p>`,
+        timer: 5500,
+        showConfirmButton: true,
+        confirmButtonText: "Entendido",
+        customClass: { popup: "netalyst-swal" },
+      });
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         return;
