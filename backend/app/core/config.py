@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     creator_min_followers_for_approval: int = 100_000
     # Límite de filas serializadas en respuestas JSON/SSE para evitar payloads gigantes.
     validation_preview_max_rows: int = 4000
+    # Comentarios SSE periódicos si un paso tarda mucho (evita corte por idle en Railway/proxies).
+    # En Railway suele ir bien 3–5 s; variable: VALIDATION_SSE_KEEPALIVE_SECONDS.
+    validation_sse_keepalive_seconds: float = 5.0
 
     @field_validator(
         "supabase_url",

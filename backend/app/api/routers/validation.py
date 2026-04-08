@@ -1,12 +1,14 @@
 import json
+import queue
+import threading
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.core.db import get_db
 from app.core.config import settings
+from app.core.db import get_db, get_session_factory
 from app.core.security import get_current_user_id
 from app.schemas.validation import CriterionRunOut, ValidationUploadResponse
 from app.services.file_ingest import read_uploaded_table
@@ -24,6 +26,9 @@ def _sse_line(payload: dict) -> str:
     return f"data: {json.dumps(payload, default=str)}\n\n"
 
 
+_SSE_DONE = object()
+
+
 @router.post(
     "/upload-stream",
     summary="Validación con progreso (SSE): criterio y paso en tiempo casi real",
@@ -31,22 +36,54 @@ def _sse_line(payload: dict) -> str:
 def upload_and_validate_stream(
     program_id: UUID = Form(..., description="ID del programa / oportunidad en BD"),
     file: UploadFile = File(..., description="Archivo .csv, .xlsx o .xls"),
-    db: Session = Depends(get_db),
     _user_id: str = Depends(get_current_user_id),
 ) -> StreamingResponse:
+    """
+    La validación corre en un hilo con su propia sesión SQLAlchemy; el generador principal
+    envía comentarios SSE (: keepalive) mientras espera, para que proxies (Railway, etc.)
+    no cierren la conexión por inactividad durante pasos largos (Apify, YouTube, …).
+    """
+
     def event_gen():
         try:
             df = read_uploaded_table(file)
         except ValueError as e:
             yield _sse_line({"type": "error", "message": str(e)})
             return
-        try:
-            for ev in iter_validation_sse_events(db, program_id, df):
-                yield _sse_line(ev)
-                if ev.get("type") in ("error",):
-                    return
-        except Exception as e:  # noqa: BLE001
-            yield _sse_line({"type": "error", "message": str(e)})
+
+        q: queue.Queue[object] = queue.Queue(maxsize=128)
+
+        def worker() -> None:
+            try:
+                SessionLocal = get_session_factory()
+                db_worker = SessionLocal()
+                try:
+                    for ev in iter_validation_sse_events(db_worker, program_id, df):
+                        q.put(ev)
+                finally:
+                    db_worker.close()
+            except Exception as e:  # noqa: BLE001
+                q.put({"type": "error", "message": str(e)})
+            finally:
+                q.put(_SSE_DONE)
+
+        threading.Thread(target=worker, name="validation-sse", daemon=True).start()
+
+        timeout = max(1.0, float(settings.validation_sse_keepalive_seconds))
+        while True:
+            try:
+                item = q.get(timeout=timeout)
+            except queue.Empty:
+                # Línea de comentario SSE: no dispara JSON en el cliente, mantiene el chunk stream vivo.
+                yield ": keepalive\n\n"
+                continue
+            if item is _SSE_DONE:
+                break
+            ev = item
+            assert isinstance(ev, dict)
+            yield _sse_line(ev)
+            if ev.get("type") == "error":
+                break
 
     return StreamingResponse(
         event_gen(),
